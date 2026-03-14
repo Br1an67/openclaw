@@ -206,6 +206,7 @@ export async function runCronIsolatedAgentTurn(params: {
   message: string;
   abortSignal?: AbortSignal;
   signal?: AbortSignal;
+  onExecutionStart?: () => void;
   sessionKey: string;
   agentId?: string;
   lane?: string;
@@ -566,6 +567,11 @@ export async function runCronIsolatedAgentTurn(params: {
           const bootstrapPromptWarningSignature =
             bootstrapPromptWarningSignaturesSeen[bootstrapPromptWarningSignaturesSeen.length - 1];
           if (isCliProvider(providerOverride, cfgWithAgentDefaults)) {
+            // CLI providers don't go through lane acquisition, so signal
+            // execution start immediately to clear the queue-wait watchdog
+            // and arm the real execution timeout.
+            params.onExecutionStart?.();
+
             // Fresh isolated cron sessions must not reuse a stored CLI session ID.
             // Passing an existing ID activates the resume watchdog profile
             // (noOutputTimeoutRatio 0.3, maxMs 180 s) instead of the fresh profile
@@ -633,6 +639,7 @@ export async function runCronIsolatedAgentTurn(params: {
             disableMessageTool: toolPolicy.disableMessageTool,
             allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
             abortSignal,
+            onLaneAcquired: params.onExecutionStart,
             bootstrapPromptWarningSignaturesSeen,
             bootstrapPromptWarningSignature,
           });
