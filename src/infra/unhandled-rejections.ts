@@ -20,6 +20,28 @@ const FATAL_ERROR_CODES = new Set([
 
 const CONFIG_ERROR_CODES = new Set(["INVALID_CONFIG", "MISSING_API_KEY", "MISSING_CREDENTIALS"]);
 
+// SQLite error codes that indicate transient failures (shouldn't crash the gateway).
+// Note: we intentionally do NOT include the broad SQLITE_IOERR base code here because
+// many IO-error subtypes (e.g. SQLITE_IOERR_NOMEM, SQLITE_IOERR_ACCESS) are permanent.
+// Only specific transient IO-error subtypes are listed.
+const TRANSIENT_SQLITE_CODES = new Set([
+  "SQLITE_CANTOPEN",
+  "SQLITE_BUSY",
+  "SQLITE_LOCKED",
+  "SQLITE_IOERR_LOCK",
+  "SQLITE_IOERR_SHORT_READ",
+  "SQLITE_IOERR_BLOCKED",
+]);
+
+// node:sqlite wraps transient SQLite failures under the generic ERR_SQLITE_ERROR code
+// and puts the transient detail in the message. These patterns identify the transient
+// subset so we can suppress them instead of crashing.
+const TRANSIENT_SQLITE_MESSAGE_PATTERNS = [
+  "database is locked",
+  "database table is locked",
+  "unable to open database file",
+];
+
 // Network error codes that indicate transient failures (shouldn't crash the gateway)
 const TRANSIENT_NETWORK_CODES = new Set([
   "ECONNRESET",
@@ -112,6 +134,21 @@ function extractErrorCodeWithCause(err: unknown): string | undefined {
   return extractErrorCode(getErrorCause(err));
 }
 
+/** Shared callback for {@link collectErrorGraphCandidates} used by both SQLite and network checks. */
+function collectNestedErrorSources(current: Record<string, unknown>): Array<unknown> {
+  const nested: Array<unknown> = [
+    current.cause,
+    current.reason,
+    current.original,
+    current.error,
+    current.data,
+  ];
+  if (Array.isArray(current.errors)) {
+    nested.push(...current.errors);
+  }
+  return nested;
+}
+
 /**
  * Checks if an error is an AbortError.
  * These are typically intentional cancellations (e.g., during shutdown) and shouldn't crash.
@@ -143,6 +180,35 @@ function isConfigError(err: unknown): boolean {
 }
 
 /**
+ * Checks if an error is a transient SQLite error that shouldn't crash the gateway.
+ * These are typically temporary I/O or locking issues (e.g., running as a LaunchAgent on macOS).
+ */
+export function isTransientSqliteError(err: unknown): boolean {
+  if (!err) {
+    return false;
+  }
+  for (const candidate of collectErrorGraphCandidates(err, collectNestedErrorSources)) {
+    const code = extractErrorCodeOrErrno(candidate);
+    if (code && TRANSIENT_SQLITE_CODES.has(code)) {
+      return true;
+    }
+    // node:sqlite emits transient failures as ERR_SQLITE_ERROR with the transient
+    // detail in the message (e.g. "database is locked", "unable to open database file").
+    if (code === "ERR_SQLITE_ERROR" && candidate && typeof candidate === "object") {
+      const rawMessage = (candidate as { message?: unknown }).message;
+      const message = typeof rawMessage === "string" ? rawMessage.toLowerCase().trim() : "";
+      if (
+        message &&
+        TRANSIENT_SQLITE_MESSAGE_PATTERNS.some((pattern) => message.includes(pattern))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Checks if an error is a transient network error that shouldn't crash the gateway.
  * These are typically temporary connectivity issues that will resolve on their own.
  */
@@ -150,19 +216,7 @@ export function isTransientNetworkError(err: unknown): boolean {
   if (!err) {
     return false;
   }
-  for (const candidate of collectErrorGraphCandidates(err, (current) => {
-    const nested: Array<unknown> = [
-      current.cause,
-      current.reason,
-      current.original,
-      current.error,
-      current.data,
-    ];
-    if (Array.isArray(current.errors)) {
-      nested.push(...current.errors);
-    }
-    return nested;
-  })) {
+  for (const candidate of collectErrorGraphCandidates(err, collectNestedErrorSources)) {
     const code = extractErrorCodeOrErrno(candidate);
     if (code && TRANSIENT_NETWORK_CODES.has(code)) {
       return true;
@@ -248,6 +302,11 @@ export function installUnhandledRejectionHandler(): void {
         "[openclaw] Non-fatal unhandled rejection (continuing):",
         formatUncaughtError(reason),
       );
+      return;
+    }
+
+    if (isTransientSqliteError(reason)) {
+      console.warn("[openclaw] Non-fatal SQLite error (continuing):", formatUncaughtError(reason));
       return;
     }
 
