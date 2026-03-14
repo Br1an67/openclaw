@@ -36,11 +36,7 @@ import {
 } from "./internal.js";
 import { type MemoryFileEntry } from "./internal.js";
 import { ensureMemoryIndexSchema } from "./memory-schema.js";
-import {
-  buildCaseInsensitiveExtensionGlob,
-  classifyMemoryMultimodalPath,
-  getMemoryMultimodalExtensions,
-} from "./multimodal.js";
+import { classifyMemoryMultimodalPath } from "./multimodal.js";
 import type { SessionFileEntry } from "./session-files.js";
 import {
   buildSessionEntry,
@@ -381,7 +377,7 @@ export abstract class MemoryManagerSyncOps {
     const watchPaths = new Set<string>([
       path.join(this.workspaceDir, "MEMORY.md"),
       path.join(this.workspaceDir, "memory.md"),
-      path.join(this.workspaceDir, "memory", "**", "*.md"),
+      path.join(this.workspaceDir, "memory"),
     ]);
     const additionalPaths = normalizeExtraMemoryPaths(this.workspaceDir, this.settings.extraPaths);
     for (const entry of additionalPaths) {
@@ -391,16 +387,7 @@ export abstract class MemoryManagerSyncOps {
           continue;
         }
         if (stat.isDirectory()) {
-          watchPaths.add(path.join(entry, "**", "*.md"));
-          if (this.settings.multimodal.enabled) {
-            for (const modality of this.settings.multimodal.modalities) {
-              for (const extension of getMemoryMultimodalExtensions(modality)) {
-                watchPaths.add(
-                  path.join(entry, "**", buildCaseInsensitiveExtensionGlob(extension)),
-                );
-              }
-            }
-          }
+          watchPaths.add(entry);
           continue;
         }
         if (
@@ -414,15 +401,38 @@ export abstract class MemoryManagerSyncOps {
         // Skip missing/unreadable additional paths.
       }
     }
+    const multimodalSettings = this.settings.multimodal;
     this.watcher = chokidar.watch(Array.from(watchPaths), {
       ignoreInitial: true,
-      ignored: (watchPath) => shouldIgnoreMemoryWatchPath(String(watchPath)),
+      ignored: (watchPath) => {
+        const p = String(watchPath);
+        if (shouldIgnoreMemoryWatchPath(p)) {
+          return true;
+        }
+        // Filter non-indexable files at the watcher level so high-churn
+        // directories don't generate events that reset the sync debounce timer.
+        try {
+          if (fsSync.lstatSync(p).isDirectory()) {
+            return false;
+          }
+        } catch {
+          // Stat may fail for transient/deleted paths; let chokidar handle it.
+          return false;
+        }
+        return !p.endsWith(".md") && classifyMemoryMultimodalPath(p, multimodalSettings) === null;
+      },
       awaitWriteFinish: {
         stabilityThreshold: this.settings.sync.watchDebounceMs,
         pollInterval: 100,
       },
     });
-    const markDirty = () => {
+    const markDirty = (filePath: string) => {
+      if (
+        !filePath.endsWith(".md") &&
+        classifyMemoryMultimodalPath(filePath, this.settings.multimodal) === null
+      ) {
+        return;
+      }
       this.dirty = true;
       this.scheduleWatchSync();
     };
