@@ -465,6 +465,23 @@ export function ensureAuthProfileStore(
 ): AuthProfileStore {
   const runtimeStore = resolveRuntimeAuthProfileStore(agentDir);
   if (runtimeStore) {
+    // Refresh the order field from disk so that external changes (e.g., CLI
+    // `auth-order set`) are not silently overwritten when the gateway persists
+    // other store updates.  resolveRuntimeAuthProfileStore() returns a clone,
+    // so this mutation does not affect the cached snapshot.  See #45516.
+    const diskStore = loadCoercedStore(resolveAuthStorePath(agentDir));
+    if (diskStore) {
+      if (agentDir && resolveRuntimeStoreKey(agentDir) !== resolveRuntimeStoreKey(undefined)) {
+        // Re-merge: keep main-store order entries alongside the fresh agent disk order.
+        // Fall back to the already-merged runtimeStore.order when no separate main
+        // snapshot exists (e.g. prepareSecretsRuntimeSnapshot with explicit agentDirs).
+        const mainSnap = runtimeAuthStoreSnapshots.get(resolveRuntimeStoreKey(undefined));
+        const baseOrder = mainSnap?.order ?? runtimeStore.order;
+        runtimeStore.order = mergeRecord(baseOrder, diskStore.order);
+      } else {
+        runtimeStore.order = diskStore.order;
+      }
+    }
     return runtimeStore;
   }
 
