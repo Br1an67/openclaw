@@ -9,23 +9,36 @@ import {
   resolveGroupSessionKey,
   resolveStorePath,
 } from "../../../../../src/config/sessions.js";
+import { resolveAccountEntry } from "../../../../../src/routing/account-lookup.js";
 
-export function resolveGroupPolicyFor(cfg: ReturnType<typeof loadConfig>, conversationId: string) {
+export function resolveGroupPolicyFor(
+  cfg: ReturnType<typeof loadConfig>,
+  conversationId: string,
+  accountId?: string | null,
+) {
   const groupId = resolveGroupSessionKey({
     From: conversationId,
     ChatType: "group",
     Provider: "whatsapp",
   })?.id;
   const whatsappCfg = cfg.channels?.whatsapp as
-    | { groupAllowFrom?: string[]; allowFrom?: string[] }
+    | {
+        groupAllowFrom?: string[];
+        allowFrom?: string[];
+        accounts?: Record<string, { groupAllowFrom?: string[]; allowFrom?: string[] }>;
+      }
     | undefined;
-  const hasGroupAllowFrom = Boolean(
-    whatsappCfg?.groupAllowFrom?.length || whatsappCfg?.allowFrom?.length,
-  );
+  const accountCfg = accountId ? resolveAccountEntry(whatsappCfg?.accounts, accountId) : undefined;
+  // Use account → root fallback (matching resolveWhatsAppAccount semantics)
+  // so an account with explicitly empty groupAllowFrom isn't bypassed by root config.
+  const resolvedGroupAllowFrom = accountCfg?.groupAllowFrom ?? whatsappCfg?.groupAllowFrom;
+  const resolvedAllowFrom = accountCfg?.allowFrom ?? whatsappCfg?.allowFrom;
+  const hasGroupAllowFrom = Boolean(resolvedGroupAllowFrom?.length || resolvedAllowFrom?.length);
   return resolveChannelGroupPolicy({
     cfg,
     channel: "whatsapp",
     groupId: groupId ?? conversationId,
+    accountId,
     hasGroupAllowFrom,
   });
 }
